@@ -1,0 +1,8 @@
+Preprocessing:
+
+1. Read in FSC files exported from flowjo
+2. Normalize data - biexponental, other options 
+3. Combine datasets from one or many experiments
+4. Align data
+5. Scale/Normalize
+

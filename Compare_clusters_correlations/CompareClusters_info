@@ -1,0 +1,4 @@
+Compare clustering by correlation between clusters
+
+1. correlate mean/median expression per cluster for each antibody with clusters from another source.
+2. correlate each cell within a cluster with mean expression from the other clusters.

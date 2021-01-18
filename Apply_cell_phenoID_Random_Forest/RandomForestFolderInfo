@@ -1,0 +1,6 @@
+Add here the scripts to
+1.Format expression matrix and labels to be read into Random Forest (in R) 
+2.Train Random Forest model
+3.Apply Random Forest model
+
+Also pull data out of scRNA seq data and create an expression matrix for training.

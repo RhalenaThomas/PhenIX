@@ -1,4 +1,4 @@
-# PhenIX
+# PhenoID
 A framework to identify and explore cellular phenotypes in human organoids using a flow cytometry antibody panel.  
 
 Contains scripts for:

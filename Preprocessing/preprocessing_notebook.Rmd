@@ -1,0 +1,173 @@
+
+```{r,include=FALSE}
+require("flowCore") #Used for reading the data
+require("ggplot2")
+require("ggridges") #visualization
+require("stringr") #set of functions to manipulate strings type in order to have nice titles
+require("rlist") #set of functions that allows to easely manipulate lists
+require("reshape2") #visualization
+require("flowStats") #Alignment functions
+require("scales") #scale colour intensity for visualization
+plotdensity_flowset <- function(flowset){ ggplot(melt(lapply(as.list(flowset@frames),function(x){x=as.data.frame(x@exprs)})), aes(x=value,y=L1,fill=L1)) + geom_density_ridges(alpha=.4,verbose=FALSE) +facet_wrap(~variable)+theme_light()} #defines a function for visualizing flowset with densityplots
+
+```
+
+#Set user variables - This chunck allows the user to set the absolute path of the input data and the desired output folder.
+
+--The input path has to contain only FCS files with or without an annotation file containing metadata. 
+
+--The output path will be used for all the outputs (graphs and tables). The variable write_fcs_files has to be set to TRUE for writing fcs files at each step of the workflow (transformed and aligned), a folder for each step is created inside the output folder.
+
+```{r}
+input_path <- "/home/alx/Documents/McGill_Neuro/Datasets/FACS_Paper/cell_line/" #Input folder containing multiple fcs files
+output_path <- "/home/alx/Documents/McGill_Neuro/Datasets/FACS_Paper/output_test/" #Output path 
+write_fcs_files <- TRUE #Set to true to write fcs files at each step (subsampled, transformed, aligned and scaled) - recommanded 
+
+#Create output folder if it's not already created
+if(dir.exists(output_path)==FALSE){ #check
+  dir.create(output_path) #create directory
+}
+```
+
+
+#Read in the data - This chunck reads in the data and selects the area values that are used for analysis. It creates a flowSet object (containing multiple flowFrames, corresponding to fcs files)
+
+```{r}
+flowset <- read.flowSet(path=input_path,transformation = FALSE ,emptyValue = FALSE,package="flowCore") #Create a flowset object
+flowset <- fsApply(flowset,function(x){x[ ,grepl("^[{'FJComp'}|{'FCS'}|{'SSC'}].*A$",colnames(flowset))]}) #Apply a function to flowSet (fsApply) that selects only the columns corresponding to areas values using "regular expression".
+write.table(fsApply(flowset,function(x){dim(x@exprs)})[,1],file=paste0(output_path,"number_cells.csv"))#Counts the number of cells inside each flowframe and writes it into the output folder.
+write.table(apply(as.data.frame(list.rbind(lapply(sampleNames(flowset),function(name){flowset[[name]]@description}))),2,as.character),file=paste0(output_path,"flowset_description.csv"))#Writes descriptions of each flowframe in a csv file
+sampleNames(flowset) #Prints the name of each flowframe inside the flowset. User can modify it in the following chunck
+#write.flowSet(flowset,outdir=paste0(output_path,"input_flowset"))#Writes the input flowset
+#flowset=read.flowSet(path=paste0(output_path,"input_flowset"),phenoData = "annotation.txt")#Read the written flowset
+```
+
+#This chunck can be used for renaming the fcs files inside the flowset
+```{r}
+sampleNames(flowset) <- c("Astro1","Neuro","NPC1","oligo","Astro2","IPSC","NPC2","Oligo") #directly modify the names inside the flowset
+sampleNames(flowset)
+```
+#Subsets - Allows to subset each fcs with a desired number of cells selected randomly (set the seed), go directly to transformation step for not subsetting
+
+Set an arbitrary number of cells (if a fcs files has less cells it will be completely selected)
+```{r,include=FALSE}
+desired_size <- 5000
+```
+Set the number to the smallest fcs files (containing the smallest amount of cells)
+```{r,include=FALSE}
+desired_size <- min(fsApply(flowset,function(x){nrow(x@exprs)}))
+```
+Subsets the data
+```{r,echo=FALSE}
+set.seed(42) #Set a seed for reproducibility 
+sf <- sampleFilter(filterId = "SizeFilter", size =desired_size) #Creates a "filter" object to subset
+flowset <- fsApply(flowset,function(x){Subset(x,sf)}) #apply the filter on every flowframe
+
+if(write_fcs_files==TRUE){
+  write.flowSet(flowset,outdir=paste0(output_path,"subsample_input_flowset"))#Writes the subsample input flowset
+  flowset=read.flowSet(path=paste0(output_path,"subsample_input_flowset"),phenoData = "annotation.txt")#Read the written flowset // The reason is for the phenodata management in the following steps
+}
+```
+
+#Transformation -  Apply a mathematical function to make the data interpretable.
+See [Finak G, Perez JM, Weng A, Gottardo R. Optimizing transformations for automated, high throughput analysis of flow cytometry data. BMC Bioinformatics. 2010;11:546. Published 2010 Nov 4. doi:10.1186/1471-2105-11-546] for more informations about transformations and possible optimizations.
+
+See https://rdrr.io/bioc/flowCore/man/ for informations about available transformations in flowCore (used in this workflow)
+
+Biexponential transformation
+```{r,echo=FALSE}
+biexp  <- biexponentialTransform("biexp transform",a = 0.5, b = 1, c = 0.5, d = 1, f = 0, w = 0) #creates the transformation object (the values make it equivalent to arcsinh transform)
+transformed_flowset <- transform(flowset, transformList(colnames(flowset), biexp)) #Apply the transformation
+if(write_fcs_files==TRUE){#Check if user set the conditional for writing several fcs files
+  write.flowSet(transformed_flowset,outdir=paste0(output_path,"transformed_flowset"))#writes the flowset
+  transformed_flowset=read.flowSet(path=paste0(output_path,"transformed_flowset"),phenoData = "annotation.txt")
+}
+```
+
+
+Scaling looses informations about the data and makes it harder to align. The main interest of this step is to harmonize the data for the classifier and make it comparable from one experience to another, thus I suggest to apply this step after the clustering.
+We could potentially makes it after the alignment but since every flow frame (.fcs) is different from each other we would loose the alignment. (it would be interesting to try to normalize each marker considering all experiments at the same time)
+
+Moreover the actual presence of some outlayers (supposively from a bad cleaning of the data in the first place) biase the results concerning the z-score normalization.
+
+#Alignment
+
+Be carefull with this step. Check the density plots before and after the alignment to make sure peaks are aligned
+```{r}
+normtr <- gaussNorm(flowset = transformed_flowset,channel.names = colnames(transformed_flowset)[c(3:length(colnames(transformed_flowset)))], max.lms = 2, peak.density.thr = 0.01, peak.distance.thr = 0.5) #Detects and align 2 peaks (max.lms) for all markers except FSC and SSC (columns 3 to number of markers) the threshold are data-dependant and may have to differ from one analysis to another.
+
+aligned_transformed_flowset <- normtr$flowset
+
+plotdensity_flowset(transformed_flowset)
+plotdensity_flowset(aligned_transformed_flowset)
+```
+
+#Writing csv files with informations
+
+```{r}
+flowset_to_csv=function(flowset){  
+  list_of_flowframes=fsApply(rename_markers(flowset),function(x){as.data.frame(x@exprs)})#Makes a list of dataframes
+  list_names=names(list_of_flowframes)#extract names for not calling names() function at each loop
+  for (index in seq_along(list_of_flowframes)){ #Iterates along the index for adding sample names
+    list_of_flowframes[[index]]=list_of_flowframes[[index]] %>% #Using tidyverse package for adding features (name of batch)
+      mutate(Batch=list_names[index])
+  }
+  ds=list.rbind(list_of_flowframes)#binds everything
+  ds$cell=as.factor(unlist(lapply(as.list(c(1:length(flowset))),function(x){c(1:nrow(flowset[[x]]@exprs))})))#add cell IDs - cell count per sample 
+  write.csv(ds,file=paste0(output_path,"dataset.csv"))#writes the result
+  saveRDS(ds,file=paste0(output_path,"dataset.rds"))
+}
+flowset_to_csv(aligned_transformed_flowset)
+
+#Writes a text file with more informations about the system
+sys=Sys.info()
+fileConn<-file(paste0(output_path,"call_description.txt")) #Writes txt files that describe the work 
+writeLines(c(paste0(as.character(Sys.time())," ",Sys.timezone()),
+            paste0("Import ", "8"," fcs files :"),
+            "",
+            sampleNames(flowset),
+            "",
+            paste0("data is subset to ",as.character(desired_size)," cells per fcs file"),
+            "",
+            paste0("written in ", output_path),
+            "",
+            "system informations:",
+            paste0("sysname : ",sys[1]),
+            paste0("release : ",sys[2]),
+            paste0("version : ",sys[3]),
+            paste0("node name : ",sys[4]),
+            paste0("machine : ",sys[5]),
+            paste0("login : ",sys[6]),
+            paste0("user : ",sys[7]),
+            paste0("effective_user : ",sys[8])
+            ),
+          fileConn)
+close(fileConn)
+```
+
+/!\ I kept normalization steps (scaling) in the notebook but I don't recommand to use it on cell lines. 
+
+#Scaling - outlayers make the zscore normalization messy, it is not the case on "clean" dataset such as organoids. 
+```{r}
+zscorenorm_flowset <- function(flowset){ #Defines a function for applying zscore normalization to each flowframe within the flowset in parameter
+  copy_flowset=flowset[seq(along=flowset)] #makes a copy of the input flowset
+  for (i in 1:length(copy_flowset)){ #loop though index to get each flowframe
+    copy_flowset[[i]]@exprs=scale(flowset[[i]]@exprs,center=TRUE,scale=TRUE)#zscore using the default scale function
+  }
+  return(copy_flowset)#Return the scaled flowset
+}
+
+minmax_flowset <- function(flowset){ #Defines a function for applying zscore normalization to each flowframe within the flowset in parameter
+  copy_flowset=flowset[seq(along=flowset)] #makes a copy of the input flowset
+  for (i in 1:length(copy_flowset)){ #loop though index to get each flowframe
+    copy_flowset[[i]]@exprs=apply(flowset[[i]]@exprs,2,function(x){(x-min(x))/(max(x)-min(x))})#minmax normalization
+  }
+  return(copy_flowset)#Return the scaled flowset
+}
+
+scaledminmax_transformed_flowset <- minmax_flowset(aligned_transformed_flowset)
+scaledzscore_transformed_flowset <- zscorenorm_flowset(transformed_flowset)
+
+plotdensity_flowset(scaledminmax_transformed_flowset)
+plotdensity_flowset(scaledzscore_transformed_flowset)
+```
